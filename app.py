@@ -1,123 +1,92 @@
 import streamlit as st
-from transformers import GPT2LMHeadModel, GPT2Tokenizer, pipeline
+from transformers import T5ForConditionalGeneration, T5Tokenizer
+import os
 import torch
-import re  # For formatting the output
 
-# --- 1. Page Configuration ---
-st.set_page_config(
-    page_title="🍳 Recipe Generator",
-    page_icon="🍳",
-    layout="centered",
-    initial_sidebar_state="auto"
-)
+MODEL_DIR = "t5-summarizer-with-checkpoints" 
 
-# --- 2. Model Loading ---
-MODEL_PATH = "./final_model"
-
-# Use Streamlit's caching to load the model only once.
 @st.cache_resource
-def load_model():
-    print("--- Loading model and tokenizer ---")
-    
-    # Load the fine-tuned tokenizer
-    # We set padding_side='left' for batch generation (as we learned)
-    tokenizer = GPT2Tokenizer.from_pretrained(MODEL_PATH)
-    tokenizer.padding_side = 'left'
-    
-    # Load the fine-tuned model
-    model = GPT2LMHeadModel.from_pretrained(MODEL_PATH)
-    
-    # Set the pad token
-    tokenizer.pad_token = tokenizer.eos_token
-    
-    # Create the text-generation pipeline
-    # We use device=-1 for CPU to ensure compatibility with services
-    # like Streamlit Cloud. Change to device=0 if you have a GPU.
-    generator_pipeline = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        device=-1  # Use device=0 if you are running this on a GPU machine
-    )
-    print("--- Model and tokenizer loaded successfully ---")
-    return generator_pipeline, tokenizer
+def load_model_and_tokenizer(model_directory):
+    """
+    Loads the T5 model and tokenizer from a local directory.
+    Uses st.cache_resource to load only once.
+    """
+    st.write(f"Loading model from {model_directory}...")
+    try:
+        tokenizer = T5Tokenizer.from_pretrained(model_directory)
+        model = T5ForConditionalGeneration.from_pretrained(model_directory)
+        st.write("Model loaded successfully!")
+        return model, tokenizer
+    except Exception as e:
+        st.error(f"Error loading model: {e}")
+        st.error(f"Please make sure the directory '{model_directory}' exists and contains the model files.")
+        return None, None
 
-# Load the model and show a spinner
-with st.spinner("Loading the recipe model... This may take a moment."):
-    generator, tokenizer = load_model()
+def generate_summary(text, model, tokenizer):
+    """
+    Generates a summary for the given text using the loaded model.
+    """
+    # T5 models require a prefix, like "summarize: "
+    prefixed_text = "summarize: " + text.strip()
 
-# --- 3. App Interface ---
-st.title("🍳 AI Recipe Generator")
-st.markdown("This app uses a fine-tuned **GPT-2 model** to generate new recipes based on a title and ingredients. The model was trained on the `3A2M_EXTENDED.csv` dataset.")
-
-# --- 4. User Input ---
-with st.form(key="recipe_form"):
-    # Input for Recipe Title
-    title = st.text_input(
-        "Enter a Recipe Title:",
-        "Spicy Chicken Pasta"
+    # Encode the text
+    inputs = tokenizer.encode(
+        prefixed_text, 
+        return_tensors="pt", 
+        max_length=512, 
+        truncation=True
     )
 
-    # Input for Ingredients
-    ingredients_raw = st.text_area(
-        "Enter Ingredients (comma-separated):",
-        "chicken breast, pasta, cayenne pepper, olive oil, garlic, tomatoes"
+    # Generate the summary
+    summary_ids = model.generate(
+        inputs, 
+        max_length=150,  # Max length of the summary
+        min_length=40,   # Min length of the summary
+        length_penalty=2.0,
+        num_beams=4,
+        early_stopping=True
     )
-    
-    # Generation parameters in a collapsible section
-    with st.expander("Advanced Settings"):
-        temp = st.slider("Creativity (Temperature)", min_value=0.2, max_value=1.5, value=0.7, step=0.1)
-        max_tokens = st.slider("Max Recipe Length (Tokens)", min_value=50, max_value=250, value=150, step=10)
 
-    # Submit button for the form
-    submit_button = st.form_submit_button(label="Generate Recipe")
+    # Decode the summary
+    summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+    return summary
 
-# --- 5. Generation Logic ---
-if submit_button:
-    if not title or not ingredients_raw:
-        st.error("Please provide both a title and ingredients.")
-    else:
-        with st.spinner("Brewing up your recipe... 🧑‍🍳"):
-            # Clean and format the user's input
-            title_clean = title.strip().lower()
-            ingredients_clean = ", ".join([ing.strip().lower() for ing in ingredients_raw.split(',')])
+# --- Streamlit App UI ---
 
-            # This prompt format MUST match the one used during training
-            prompt = (
-                f"TITLE: {title_clean}\n"
-                f"INGREDIENTS: {ingredients_clean}\n"
-                f"RECIPE:"
-            )
+st.set_page_config(page_title="Text Summarizer", layout="wide")
+st.title("📄 Text Summarization App")
+st.write("This app uses a fine-tuned T5 model to summarize your text.")
+st.write(f"Model directory: `{MODEL_DIR}`")
 
-            try:
-                # Call the pipeline
-                generated_output = generator(
-                    prompt,
-                    max_new_tokens=max_tokens,
-                    no_repeat_ngram_size=2,
-                    temperature=temp,
-                    top_k=50,
-                    eos_token_id=tokenizer.eos_token_id,
-                    pad_token_id=tokenizer.eos_token_id
-                )
+# Check if model directory exists
+if not os.path.exists(MODEL_DIR):
+    st.error(f"Model directory not found: '{MODEL_DIR}'")
+    st.error("Please make sure your downloaded model folder is in the same directory as this script and is named correctly.")
+else:
+    # Load the model
+    model, tokenizer = load_model_and_tokenizer(MODEL_DIR)
 
-                # --- 6. Process and Display Output ---
-                full_text = generated_output[0]['generated_text']
-                recipe_part = full_text[len(prompt):].strip()
+    if model and tokenizer:
+        st.success("Model and tokenizer are loaded and ready!")
 
-                # Clean the output (remove extra EOS tokens)
-                if tokenizer.eos_token in recipe_part:
-                    recipe_part = recipe_part.split(tokenizer.eos_token)[0]
+        # User input text area
+        input_text = st.text_area(
+            "Enter text to summarize:", 
+            height=250, 
+            placeholder="Paste a long article or text here..."
+        )
 
-                # --- Improve readability by adding newlines ---
-                # This turns "1. step one 2. step two" into:
-                # 1. step one
-                # 2. step two
-                # We use regex to add a newline before any number followed by a period
-                formatted_recipe = re.sub(r' (\d+\.)', r'\n\1', recipe_part).strip()
-
-                st.subheader(f"Here's your recipe for: {title}")
-                st.markdown(formatted_recipe)
-
-            except Exception as e:
-                st.error(f"An error occurred during generation: {e}")
+        # Summarize button
+        if st.button("Generate Summary"):
+            if not input_text.strip():
+                st.warning("Please enter some text to summarize.")
+            else:
+                # Show a spinner while processing
+                with st.spinner("Summarizing..."):
+                    try:
+                        summary = generate_summary(input_text, model, tokenizer)
+                        
+                        st.subheader("Generated Summary:")
+                        st.success(summary)
+                    except Exception as e:
+                        st.error(f"An error occurred during summarization: {e}")
